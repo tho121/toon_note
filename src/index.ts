@@ -6,10 +6,28 @@ import {
 import { IMainMenu } from '@jupyterlab/mainmenu';
 
 import {
-	INotebookTools, INotebookTracker//, NotebookActions
+	INotebookTools, INotebookTracker, NotebookActions, Notebook, NotebookPanel, INotebookModel
 } from '@jupyterlab/notebook';
 
-import { Cell } from '@jupyterlab/cells';
+import { Cell, CodeCell } from '@jupyterlab/cells';
+
+import { toArray } from '@lumino/algorithm';
+
+import { DocumentRegistry } from '@jupyterlab/docregistry';
+
+import { ToolbarButton } from '@jupyterlab/apputils';
+
+import {
+	IDisposable, DisposableDelegate
+} from '@lumino/disposable';
+
+import {
+	//searchIcon,
+	//refreshIcon,
+	editIcon,
+	stopIcon,
+	//saveIcon,
+} from '@jupyterlab/ui-components';
 
 /**
  * Initialization data for the toon_note extension.
@@ -29,7 +47,80 @@ const notebookWidth = "1100px";
 var notebookTools: INotebookTools;
 var notebookTracker: INotebookTracker;
 
+const mouseActionTimeSeparation = 25;
+
+var mouseActionsArray: MouseActions[];
+
+var queuedEventsElement: HTMLElement[];
+var queuedMouseActions: string[];
+
 let showingComic = false;
+
+//class for saving mouse movements + actions
+class MouseActions {
+	id: string;
+	mouseEventType: string[];
+	relativeMousePosXArray: number[];
+	relativeMousePosYArray: number[];
+	childIndexArray: number[];
+	mouseClickTrails: any[];
+
+	constructor(cellId: string) {
+		this.id = cellId;
+
+		this.reset();
+	}
+
+	reset = function (this: MouseActions): void {
+
+		this.mouseEventType = new Array();
+		this.relativeMousePosXArray = new Array();
+		this.relativeMousePosYArray = new Array();
+		this.childIndexArray = new Array();
+		this.mouseClickTrails = new Array();
+	}
+
+	updateMetadata = function (this: MouseActions): void {
+
+		let cells = notebookTools.activeNotebookPanel.content.model.cells;
+
+		for (let i = 0; i < cells.length; ++i) {
+			if (cells.get(i).id == this.id) {
+
+				cells.get(i).metadata.set("mouseEventType", this.mouseEventType);
+				cells.get(i).metadata.set("relativeMousePosXArray", this.relativeMousePosXArray);
+				cells.get(i).metadata.set("relativeMousePosYArray", this.relativeMousePosYArray);
+				cells.get(i).metadata.set("childIndexArray", this.childIndexArray);
+				cells.get(i).metadata.set("mouseClickTrails", this.mouseClickTrails);
+				//exit out
+				return;
+			}
+		}
+	}
+
+	updateFromMetadata = function (this: MouseActions): boolean {
+
+		let cells = notebookTools.activeNotebookPanel.content.model.cells;
+
+		for (let i = 0; i < cells.length; ++i) {
+			if (cells.get(i).id == this.id && cells.get(i).metadata.has("mouseEventType")) {
+
+				this.mouseEventType = cells.get(i).metadata.get("mouseEventType") as string[];
+				this.relativeMousePosXArray = cells.get(i).metadata.get("relativeMousePosXArray") as number[];
+				this.relativeMousePosYArray = cells.get(i).metadata.get("relativeMousePosYArray") as number[];
+				this.childIndexArray = cells.get(i).metadata.get("childIndexArray") as number[];
+				this.mouseClickTrails = cells.get(i).metadata.get("mouseClickTrails") as number[];
+
+				//exit out if found
+				return true;
+			}
+		}
+
+		return false;
+	}
+}
+
+
 
 const extension: JupyterFrontEndPlugin<void> = {
 	id: 'toon_note:plugin',
@@ -50,7 +141,11 @@ const extension: JupyterFrontEndPlugin<void> = {
 		notebookTools = notebook;
 		notebookTracker = tracker;
 
-		//NotebookActions.executed.connect(onCellExecute);
+		mouseActionsArray = new Array();
+		queuedEventsElement = new Array();
+		queuedMouseActions = new Array();
+
+		NotebookActions.executed.connect(onCellExecute);
 
 		notebookTracker.currentChanged.connect(() => {
 			setTimeout(() => {
@@ -187,34 +282,180 @@ const extension: JupyterFrontEndPlugin<void> = {
 	}
 };
 
-//function onCellExecute(slot: any, args: {
-//	notebook: Notebook;
-//	cell: Cell;
-//}) {
-//	if (args.cell.model.type == 'code') {
-//		setTimeout(function () {
-//			var codeCell = (<CodeCell>args.cell);
-//			queuedMouseActions.push(codeCell.model.id);
-//			queuedEventsElement.push(codeCell.outputArea.node);
-//			if (queuedMouseActions.length > 0 && !isDispatchingEvents) {
-//				dispatchEvents();
-//				var myLoop = function () {
-//					setTimeout(function () {
-//						if (!isDispatchingEvents) {
-//							applyCodeFrame(codeCell);
-//							return;
-//						}
-//						myLoop();
-//					}, 500);
-//				};
-//				myLoop();
-//			}
-//			else {
-//				applyCodeFrame(codeCell);
-//			}
-//		}, 1000);
-//	}
-//}
+function onCellExecute(slot: any, args: {
+	notebook: Notebook;
+	cell: Cell;
+}) {
+	if (args.cell.model.type == 'code') {
+		setTimeout(function () {
+			var codeCell = (<CodeCell>args.cell);
+			queuedMouseActions.push(codeCell.model.id);
+			queuedEventsElement.push(codeCell.outputArea.node);
+			if (queuedMouseActions.length > 0 && !isDispatchingEvents) {
+				dispatchEvents();
+				var myLoop = function () {
+					setTimeout(function () {
+						if (!isDispatchingEvents) {
+							applyCodeFrame(codeCell);
+							return;
+						}
+						myLoop();
+					}, 500);
+				};
+				myLoop();
+			}
+			else {
+				applyCodeFrame(codeCell);
+			}
+		}, 1000);
+	}
+}
+
+//action replay
+
+var isDispatchingEvents = false;
+var isCallingBack: boolean = false;
+var gRect: DOMRect;
+
+const dispatchEvents = function () {
+
+	if (queuedMouseActions.length > 0) {
+
+		isDispatchingEvents = true;
+		isCallingBack = true;
+
+		let mouseActionsId = queuedMouseActions.shift();
+
+		let ma = getMouseActions(mouseActionsId);
+		if (ma == null) {
+			isDispatchingEvents = false;
+			isCallingBack = false;
+			return;
+		}
+
+		let mouseClickIndex = 0;
+		ma.updateFromMetadata();
+
+		let node = queuedEventsElement.shift();
+		let i = 0;
+
+		var myLoop = function () {
+
+			setTimeout(function () {
+
+				if (i >= ma.mouseEventType.length) {
+					dispatchEvents();   //iterate new loop
+					return;
+				}
+
+				let outputAreaElement = node.children[ma.childIndexArray[i]];
+				outputAreaElement = outputAreaElement.getElementsByClassName('jp-OutputArea-output')[0];
+				//outputAreaElement = outputAreaElement.children[1];  //make outputAreaElement equal jp-OutputArea-output, first is always the prompt box
+				outputAreaElement.scrollIntoView(true);
+
+				let rect = outputAreaElement.getBoundingClientRect();
+
+				let posX = (rect.width * ma.relativeMousePosXArray[i]) + rect.left;
+				let posY = (rect.height * ma.relativeMousePosYArray[i]) + rect.top;
+
+				if (ma.mouseEventType[i] == 'click' || ma.mouseEventType[i] == 'dblclick') {
+					for (let j = ma.mouseClickTrails[mouseClickIndex].length - 1; j >= 0; --j) {
+						let index = ma.mouseClickTrails[mouseClickIndex][j];
+						outputAreaElement = outputAreaElement.children[index];
+					}
+
+					//when going really deep, might have like no rect
+					//ok if 1, maybe 0 also works
+					//TODO: more testing
+					posX = outputAreaElement.clientLeft + outputAreaElement.scrollLeft + 1;
+					posY = outputAreaElement.clientTop + outputAreaElement.scrollTop + 1;
+				}
+
+				let newMouseEvent = new MouseEvent(ma.mouseEventType[i],
+					{
+						bubbles: true,
+
+						clientX: posX,
+						clientY: posY,
+					});
+
+				if (ma.mouseEventType[i] == 'click' || ma.mouseEventType[i] == 'dblclick') {
+					outputAreaElement.dispatchEvent(newMouseEvent);
+					mouseClickIndex++;
+				}
+				else {
+					let e = document.elementFromPoint(posX, posY);
+
+					if (e != null && e !== undefined) {
+						e.dispatchEvent(newMouseEvent);
+					}
+				}
+
+				i++;
+
+				myLoop();
+
+			}, mouseActionTimeSeparation);
+
+		}
+
+		myLoop();
+	}
+	else {
+		isDispatchingEvents = false;
+		isCallingBack = false;
+	}
+};
+
+const getMouseActions = function (cellId: string): MouseActions {
+
+	for (let i = 0; i < mouseActionsArray.length; ++i) {
+		if (mouseActionsArray[i].id == cellId) {
+			return mouseActionsArray[i];
+		}
+	}
+
+	//if not found
+	let ma = new MouseActions(cellId);
+	ma.updateFromMetadata();
+	mouseActionsArray.push(ma);
+
+	return ma;
+}
+
+const getIndexTrail = function (x: number, y: number): number[] {
+
+	var trail: number[];
+	trail = new Array();
+
+	let e = document.elementFromPoint(x, y);
+
+	while (e != null && !e.classList.contains('jp-OutputArea-output')) {
+
+		for (let i = 0; i < e.parentElement.children.length; ++i) {
+			if (e.parentElement.children[i] == e) {
+				trail.push(i);
+				break;
+			}
+		}
+
+		e = e.parentElement;
+	}
+
+	return trail;
+};
+
+
+function applyCodeFrame(codeCell: CodeCell) {
+	if (IsComicCell(codeCell)) {
+		var element = getOutputAreaElements(codeCell.node);
+		element.frame.setAttribute('style', '');
+		element.frame.parentElement.parentElement.parentElement.setAttribute('style', '');
+		formatOutputArea(codeCell, showingComic);
+		element.frame.scrollIntoView(true);
+	}
+}
+
 
 function IsComicCell(cell: Cell): boolean {
 	if (cell !== undefined) {
@@ -586,7 +827,222 @@ function markdownFunction(markdown: HTMLElement, isBottom: boolean) {
 	return annotationbox;
 }
 
+const getOutputAreaRect = function (event: MouseEvent) {
 
+	let e = (<HTMLElement>event.target);
+
+	while (e != null && !e.classList.contains('jp-OutputArea-child')) {
+		e = e.parentElement;
+	}
+
+	if (e != null) {
+		for (let i = 0; i < e.parentElement.childElementCount; ++i) {
+			if (e.parentElement.children[i] == e) {
+				e = <HTMLElement>e.getElementsByClassName('jp-OutputArea-output')[0];
+				//e = (<HTMLElement>e.children[1]);   //set to jp-OutputArea-output, 0 is always the prompt box
+
+				return { rect: e.getBoundingClientRect(), index: i };
+			}
+		}
+	}
+
+	return { rect: null, index: -1 };
+};
+
+const containsMouseActions = function (cellId: string): boolean {
+
+	let isFound = false;
+
+	for (let i = 0; i < mouseActionsArray.length; ++i) {
+		if (mouseActionsArray[i].id == cellId) {
+			isFound = true;
+			break;
+		}
+	}
+
+	return isFound;
+}
+
+const recordClick = function (this: HTMLElement, event: MouseEvent): void {
+
+	if (isCallingBack)
+		return;
+
+	let rect = getOutputAreaRect(event);
+
+	if (rect.index < 0) {
+		return;
+	}
+
+	var cellId = notebookTools.activeCell.model.id;
+	var actions = getMouseActions(cellId);
+
+	actions.childIndexArray.push(rect.index);
+
+	actions.relativeMousePosXArray.push((event.clientX - rect.rect.left) / rect.rect.width);
+	actions.relativeMousePosYArray.push((event.clientY - rect.rect.top) / rect.rect.height);
+
+	actions.mouseEventType.push(event.type);
+	actions.mouseClickTrails.push(getIndexTrail(event.clientX, event.clientY));
+};
+
+const recordMouseDown = (event: MouseEvent): void => {
+
+	if (isCallingBack)
+		return;
+
+	var rect = getOutputAreaRect(event);
+
+	let index = rect.index;
+
+	if (index < 0) {
+		return;
+	}
+
+	var cellId = notebookTools.activeCell.model.id;
+	var actions = getMouseActions(cellId);
+
+	actions.childIndexArray.push(index);
+
+	gRect = rect.rect;
+
+	actions.relativeMousePosXArray.push((event.clientX - gRect.left) / gRect.width);
+	actions.relativeMousePosYArray.push((event.clientY - gRect.top) / gRect.height);
+
+
+	actions.mouseEventType.push(event.type);
+
+	document.addEventListener('mousemove', recordMouseMove);
+	document.addEventListener('mouseup', recordDocumentMouseUp);
+};
+
+const recordMouseMove = (event: MouseEvent): void => {
+
+	if (isCallingBack)
+		return;
+
+	var cellId = notebookTools.activeCell.model.id;
+	var actions = getMouseActions(cellId);
+
+	let cia = actions.childIndexArray;
+
+	//push what's at the back repeatedly, same index as from mousedown
+	cia.push(cia[cia.length - 1]);
+
+	var rect = gRect;
+
+	actions.relativeMousePosXArray.push((event.clientX - rect.left) / rect.width);
+	actions.relativeMousePosYArray.push((event.clientY - rect.top) / rect.height);
+
+	actions.mouseEventType.push(event.type);
+};
+
+const recordDocumentMouseUp = function (event: MouseEvent): void {
+
+	if (isCallingBack)
+		return;
+
+	var cellId = notebookTools.activeCell.model.id;
+	var actions = getMouseActions(cellId);
+
+	let cia = actions.childIndexArray;
+
+	//push what's at the back repeatedly, same index as from mousedown
+	cia.push(cia[cia.length - 1]);
+
+	var rect = gRect;
+
+	actions.relativeMousePosXArray.push((event.clientX - rect.left) / rect.width);
+	actions.relativeMousePosYArray.push((event.clientY - rect.top) / rect.height);
+
+	actions.mouseEventType.push(event.type);
+
+	document.removeEventListener('mousemove', recordMouseMove);
+	document.removeEventListener('mouseup', recordDocumentMouseUp);
+	gRect = null;
+};
+
+
+export class CaptureEventsButtonExtension implements DocumentRegistry.IWidgetExtension<NotebookPanel, INotebookModel> {
+
+	createNew(panel: NotebookPanel, context: DocumentRegistry.IContext<INotebookModel>): IDisposable {
+
+		let recordingCallback = () => {
+
+			isDispatchingEvents = false;
+			isCallingBack = false;
+
+			if (panel.content.activeCell.model.type == 'code') {
+
+				//logToCSV('CaptureEventsButtonExtension: Record');
+
+				var codeCell = (<CodeCell>panel.content.activeCell);
+
+				if (!containsMouseActions(codeCell.model.id)) {
+					mouseActionsArray.push(new MouseActions(codeCell.model.id));
+				}
+
+				let actions = getMouseActions(codeCell.model.id);
+
+				actions.reset();
+
+				codeCell.outputArea.widgets.forEach((widget) => {
+
+					//output area child
+					let children = toArray(widget.children());
+
+					for (var i = 0; i < children.length; ++i) {
+						if (children[i].node.classList.contains('jp-OutputArea-output')) {
+
+							children[i].node.removeEventListener('click', recordClick);
+							children[i].node.removeEventListener('dblclick', recordClick);
+							children[i].node.removeEventListener('mousedown', recordMouseDown);
+
+							children[i].node.addEventListener('click', recordClick);
+							children[i].node.addEventListener('dblclick', recordClick);
+							children[i].node.addEventListener('mousedown', recordMouseDown);
+						}
+					}
+				});
+
+			}
+		};
+
+		let stopRecordingCallback = () => {
+			if (panel.content.activeCell.model.type == 'code') {
+
+				//logToCSV('CaptureEventsButtonExtension: StopRecord');
+
+				var codeCell = (<CodeCell>panel.content.activeCell);
+
+				let actions = getMouseActions(codeCell.model.id);
+				actions.updateMetadata();
+			}
+		};
+
+		let recordButton = new ToolbarButton({
+			className: 'record',
+			icon: editIcon,
+			onClick: recordingCallback,
+			tooltip: 'record actions'
+		});
+
+		let stopButton = new ToolbarButton({
+			className: 'stop',
+			icon: stopIcon,
+			onClick: stopRecordingCallback,
+			tooltip: 'stop recording'
+		});
+
+
+		panel.toolbar.insertItem(2, 'record', recordButton);
+		panel.toolbar.insertItem(3, 'stop', stopButton);
+		return new DisposableDelegate(() => {
+			recordButton.dispose();
+			stopButton.dispose();
+		});
+	}
+}
 
 
 export default extension;
