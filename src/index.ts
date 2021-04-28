@@ -22,8 +22,8 @@ import {
 } from '@lumino/disposable';
 
 import {
-	//searchIcon,
-	//refreshIcon,
+	searchIcon,
+	refreshIcon,
 	editIcon,
 	stopIcon,
 	//saveIcon,
@@ -144,6 +144,16 @@ const extension: JupyterFrontEndPlugin<void> = {
 		mouseActionsArray = new Array();
 		queuedEventsElement = new Array();
 		queuedMouseActions = new Array();
+
+		var toggleButton = new ToggleInputCodeButton();
+		app.docRegistry.addWidgetExtension('Notebook', toggleButton);
+
+		var resetButton = new ResetButton();
+		app.docRegistry.addWidgetExtension('Notebook', resetButton);
+
+
+		var newCaptureEventButton = new CaptureEventsButtonExtension();
+		app.docRegistry.addWidgetExtension('Notebook', newCaptureEventButton);
 
 		NotebookActions.executed.connect(onCellExecute);
 
@@ -1040,6 +1050,128 @@ export class CaptureEventsButtonExtension implements DocumentRegistry.IWidgetExt
 		return new DisposableDelegate(() => {
 			recordButton.dispose();
 			stopButton.dispose();
+		});
+	}
+}
+
+export class ToggleInputCodeButton implements DocumentRegistry.IWidgetExtension<NotebookPanel, INotebookModel> {
+
+	//private previousCell: Cell;
+
+	private previousMargin = "";
+
+	createNew(panel: NotebookPanel, context: DocumentRegistry.IContext<INotebookModel>): IDisposable {
+
+		let callback = () => {
+
+			if (showingComic) {
+
+				var cell = panel.content.activeCell;
+
+				if (cell != null) {
+					if (cell.model.type == 'code') {
+
+						var elements = getOutputAreaElements(cell.node);
+						var frame = elements.frame;
+						var codeArea = elements.codecell;
+
+						//toggle code area and annobox depending if the code area is currently showing or not
+						var isCodeShowing = false;
+
+						if (codeArea.getAttribute('style') == "display: ;") {
+							isCodeShowing = true;
+						}
+
+						//logToCSV('ToggleInputCodeButton:' + isCodeShowing);
+
+						var markdown = findCorrespondingMarkdownCell(cell);
+
+						if (!isCodeShowing) {   //in comic view, show code
+
+							this.previousMargin = elements.output_arr[0].item(0).parentElement.style.marginBottom;
+
+							frame.setAttribute('style', '');
+							frame.parentElement.parentElement.parentElement.setAttribute('style', '');
+							frame.firstElementChild.setAttribute('style', 'display:;'); //show prompt
+
+							markdown?.show();
+						}
+						else {
+							set_frameStyle(frame, getComicWidth(cell), getComicHeight(cell));
+							markdown?.hide();
+
+							elements.output_arr[0].item(0).parentElement.style.marginBottom = this.previousMargin;
+						}
+
+						isCodeShowing ? codeArea.setAttribute("style", "display: none;") : codeArea.setAttribute("style", "display: ;");
+
+						for (var node of frame.children) {
+							if (node.className == 'annobox') {
+
+								var currentStyle = node.getAttribute('style');
+
+								currentStyle = isCodeShowing ? currentStyle.replace("display: none;", "") : currentStyle.concat("display: none;");
+
+								node.setAttribute('style', currentStyle);
+							}
+						}
+
+						frame.scrollIntoView(true);
+					}
+				}
+			}
+		};
+
+		let button = new ToolbarButton({
+			className: 'showCode',
+			icon: searchIcon,
+			onClick: callback,
+			tooltip: 'Show Comic code'
+		});
+
+		panel.toolbar.insertItem(0, 'showCC', button);
+		return new DisposableDelegate(() => {
+			button.dispose();
+		});
+	}
+}
+
+function reconnectCellExecution() {
+
+	NotebookActions.executed.disconnect(reconnectCellExecution);
+	NotebookActions.executed.connect(onCellExecute);
+}
+
+export class ResetButton implements DocumentRegistry.IWidgetExtension<NotebookPanel, INotebookModel> {
+
+	createNew(panel: NotebookPanel, context: DocumentRegistry.IContext<INotebookModel>): IDisposable {
+
+		let callback = () => {
+
+			//logToCSV('ResetButton:');
+
+			let cellId = panel.content.activeCell.model.id;
+
+			let ma = getMouseActions(cellId);
+			ma.reset();
+			ma.updateMetadata();
+
+			NotebookActions.executed.disconnect(onCellExecute);
+			NotebookActions.executed.connect(reconnectCellExecution);
+
+			NotebookActions.run(panel.content, panel.sessionContext);
+		};
+
+		let button = new ToolbarButton({
+			className: 'reset',
+			icon: refreshIcon,
+			onClick: callback,
+			tooltip: 'Reset cell'
+		});
+
+		panel.toolbar.insertItem(1, 'reset', button);
+		return new DisposableDelegate(() => {
+			button.dispose();
 		});
 	}
 }
